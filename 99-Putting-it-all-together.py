@@ -65,7 +65,8 @@ display(airbnbDF)
 
 # COMMAND ----------
 
-# TODO
+airbnbDF["price"] = airbnbDF["price"].str.slice(start=1).str.replace(',', '').astype(float)
+display(airbnbDF)
 
 # COMMAND ----------
 
@@ -76,7 +77,8 @@ display(airbnbDF)
 
 # COMMAND ----------
 
-# TODO
+airbnbDF = airbnbDF.drop(["host_total_listings_count", "neighbourhood_cleansed", "longitude", "latitude"], axis=1)
+airbnbDF = airbnbDF.dropna()
 
 # COMMAND ----------
 
@@ -86,7 +88,32 @@ display(airbnbDF)
 
 # COMMAND ----------
 
-# TODO
+# Checking the unique values for each categorical column to determine an encoding scheme
+
+display(airbnbDF)
+print(airbnbDF["cancellation_policy"].unique()) # Binary
+print(airbnbDF["property_type"].unique()) # Binary
+print(airbnbDF["room_type"].unique()) # Binary
+print(airbnbDF["bed_type"].unique()) # Binary
+
+# COMMAND ----------
+
+! pip install category_encoders
+
+# COMMAND ----------
+
+import category_encoders as ce
+
+binEncoder = ce.BinaryEncoder(cols=["cancellation_policy", "property_type", "room_type", "bed_type"])
+encodedDF = binEncoder.fit_transform(airbnbDF)
+encodedDF["host_is_superhost_enc"] = encodedDF["host_is_superhost"].map({"t":1, "f":0})
+encodedDF["instant_bookable_enc"] = encodedDF["instant_bookable"].map({"t":1, "f":0})
+
+encodedDF["sum_review_scores"] = encodedDF["review_scores_accuracy"] + encodedDF["review_scores_cleanliness"] + encodedDF["review_scores_checkin"] + encodedDF["review_scores_communication"] + encodedDF["review_scores_location"] + encodedDF["review_scores_value"]
+
+encodedDF = encodedDF.drop(["host_is_superhost", "instant_bookable", "review_scores_accuracy", "review_scores_cleanliness", "review_scores_checkin", "review_scores_communication", "review_scores_location", "review_scores_value"], axis=1)
+
+display(encodedDF)
 
 # COMMAND ----------
 
@@ -97,8 +124,12 @@ display(airbnbDF)
 
 # COMMAND ----------
 
-# TODO
 from sklearn.model_selection import train_test_split
+
+encodedDF["zipcode"] = encodedDF["zipcode"].astype(int)
+print(encodedDF.dtypes)
+
+X_train, X_test, y_train, y_test = train_test_split(encodedDF.drop(["price"], axis=1), encodedDF[["price"]].values.ravel(), random_state=42)
 
 
 # COMMAND ----------
@@ -118,7 +149,14 @@ from sklearn.model_selection import train_test_split
 
 # COMMAND ----------
 
-# TODO
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
+n_estimators = 150
+max_depth = 8
+
+rf = RandomForestRegressor(n_estimators=n_estimators, max_depth=max_depth)
+rf.fit(X_train, y_train)
 
 # COMMAND ----------
 
@@ -127,7 +165,9 @@ from sklearn.model_selection import train_test_split
 
 # COMMAND ----------
 
-# TODO
+rf_mse = mean_squared_error(y_test, rf.predict(X_test))
+
+rf_mse
 
 # COMMAND ----------
 
@@ -137,9 +177,18 @@ from sklearn.model_selection import train_test_split
 
 # COMMAND ----------
 
-# TODO
 import mlflow.sklearn
 
+with mlflow.start_run(run_name="Notebook-99-Model") as run: 
+  mlflow.sklearn.log_model(rf, "random-forest-model")
+  mlflow.log_metric("mse", rf_mse)
+  
+  mlflow.log_param("n_estimators", n_estimators)
+  mlflow.log_param("max_depth", max_depth)
+    
+
+  experimentID = run.info.experiment_id
+  artifactURI = mlflow.get_artifact_uri()
 
 # COMMAND ----------
 
@@ -155,8 +204,11 @@ import mlflow.sklearn
 
 # COMMAND ----------
 
-# TODO
 import mlflow.pyfunc
+
+best_model_URI = "dbfs:/databricks/mlflow-tracking/509953321692556/96b4fbc5edaf44bdbcc3d53311b1c267/artifacts/random-forest-model"
+
+rf_pyfunc_model = mlflow.pyfunc.load_pyfunc(best_model_URI)
 
 # COMMAND ----------
 
@@ -174,15 +226,20 @@ import mlflow.pyfunc
 
 # COMMAND ----------
 
-# TODO
-
 class Airbnb_Model(mlflow.pyfunc.PythonModel):
 
     def __init__(self, model):
         self.model = model
     
+    def postprocess(self, predictions, n_guests, n_nights):
+        pppn = predictions.copy()
+        pppn = pppn / n_guests
+        pppn = pppn / n_nights
+        return pppn
+    
     def predict(self, context, model_input):
-        # FILL_IN
+        predictions = self.model.predict(model_input)
+        return self.postprocess(predictions, model_input["accommodates"], model_input["minimum_nights"])
 
 
 # COMMAND ----------
@@ -192,10 +249,11 @@ class Airbnb_Model(mlflow.pyfunc.PythonModel):
 
 # COMMAND ----------
 
-# TODO
-final_model_path =  f"{working_path}/final-model"
+final_model_path = f"{working_path}/final-model/"
+! rm -r "/dbfs/user/ctaber2@u.rochester.edu/mlflow/99_putting_it_all_together_psp/final-model/" # For some reason, dbutils.fs.rm(final_model_path, True) kept failing. So, I just substituted a shell command
+rf_postprocess_model = Airbnb_Model(model=rf)
 
-# FILL_IN
+mlflow.pyfunc.save_model(path=final_model_path.replace("dbfs:", "/dbfs"), python_model=rf_postprocess_model)
 
 # COMMAND ----------
 
@@ -204,7 +262,8 @@ final_model_path =  f"{working_path}/final-model"
 
 # COMMAND ----------
 
-# TODO
+loaded_postprocess = mlflow.pyfunc.load_pyfunc(final_model_path.replace("dbfs:", "/dbfs"))
+print(loaded_postprocess.predict(X_test.drop("price", axis=1)))
 
 # COMMAND ----------
 
@@ -222,10 +281,9 @@ final_model_path =  f"{working_path}/final-model"
 
 # COMMAND ----------
 
-# TODO
-save the testing data 
+# save the testing data 
 test_data_path = f"{working_path}/test_data.csv"
-# FILL_IN
+X_test.to_csv(test_data_path, index=False)
 
 prediction_path = f"{working_path}/predictions.csv"
 
@@ -238,7 +296,6 @@ prediction_path = f"{working_path}/predictions.csv"
 
 # COMMAND ----------
 
-# TODO
 import click
 import mlflow.pyfunc
 import pandas as pd
@@ -248,7 +305,10 @@ import pandas as pd
 @click.option("--test_data_path", default="", type=str)
 @click.option("--prediction_path", default="", type=str)
 def model_predict(final_model_path, test_data_path, prediction_path):
-    # FILL_IN
+    model = mlflow.pyfunc.load_pyfunc(final_model_path)
+    data = pd.read_csv(test_data_path)
+    predictions = model.predict(data.drop("price", axis=1))
+    predictions.to_csv(prediction_path, index=False)
 
 
 # test model_predict function    
@@ -271,7 +331,6 @@ print(pd.read_csv(demo_prediction_path))
 
 # COMMAND ----------
 
-# TODO
 dbutils.fs.put(f"{workingDir}/MLproject", 
 '''
 name: Capstone-Project
@@ -281,8 +340,10 @@ conda_env: conda.yaml
 entry_points:
   main:
     parameters:
-      #FILL_IN
-    command:  "python predict.py #FILL_IN"
+      final_model_path: {type: str}
+      test_data_path: {type: str}
+      prediction_path: {type: str}
+    command:  "python predict.py --final_model_path {final_model_path} --test_data_path {test_data_path}, --prediction_path {prediction_path}"
 '''.strip(), overwrite=True)
 
 # COMMAND ----------
@@ -329,7 +390,6 @@ print(file_contents)
 
 # COMMAND ----------
 
-# TODO
 dbutils.fs.put(f"{workingDir}/predict.py", 
 '''
 import click
@@ -337,6 +397,15 @@ import mlflow.pyfunc
 import pandas as pd
 
 # put model_predict function with decorators here
+@click.command()
+@click.option("--final_model_path", default="", type=str)
+@click.option("--test_data_path", default="", type=str)
+@click.option("--prediction_path", default="", type=str)
+def model_predict(final_model_path, test_data_path, prediction_path):
+    model = mlflow.pyfunc.load_pyfunc(final_model_path)
+    data = pd.read_csv(test_data_path)
+    predictions = model.predict(data.drop("price", axis=1))
+    predictions.to_csv(prediction_path, index=False)
     
 if __name__ == "__main__":
   model_predict()
@@ -364,10 +433,13 @@ display( dbutils.fs.ls(workingDir) )
 
 # COMMAND ----------
 
-# TODO
 second_prediction_path = f"{working_path}/predictions-2.csv"
 mlflow.projects.run(working_path,
-   # FILL_IN
+   parameters={
+       "final_model_path": final_model_path,
+       "test_data_path": test_data_path,
+       "prediction_path": second_prediction_path
+   }
 )
 
 # COMMAND ----------
